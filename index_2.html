@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Fortnite-Lite Arena</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#111; color:#eee; font-family:sans-serif;}
+  #ui { position:absolute; top:10px; left:10px; z-index:10; background: rgba(0,0,0,0.5); padding:10px; border-radius:6px; }
+  #hud { position:absolute; top:10px; right:10px; z-index:10; background: rgba(0,0,0,0.5); padding:10px; border-radius:6px; text-align:right;}
+  .mobile-controls { position:absolute; z-index:11; left:10px; bottom:10px; display:flex; gap:10px; user-select:none; }
+  .btn { width:60px; height:60px; border-radius:10px; background: rgba(255,255,255,0.06); display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:18px; box-shadow:0 4px 8px rgba(0,0,0,0.6);}
+  .btn:active { transform: translateY(2px); }
+  .fire { width:80px; height:80px; border-radius:50%; background: linear-gradient(180deg, rgba(255,60,60,0.9), rgba(200,0,0,0.9)); font-size:18px; }
+  #message { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:12; color:#fff; background: rgba(0,0,0,0.6); padding:20px; border-radius:12px; display:none; text-align:center; }
+</style>
+</head>
+<body>
+<div id="canvas-wrap"></div>
+
+<div id="ui"><strong>Fortnite-Lite</strong><br>WASD / Arrows to move • Click / Tap to shoot • Space to jump</div>
+<div id="hud">Score: <span id="score">0</span><br>Health: <span id="health">100</span><br><button id="restartBtn">Restart</button></div>
+
+<div class="mobile-controls" id="mobile-controls">
+  <div style="display:flex;flex-direction:column;gap:8px;">
+    <div class="btn" id="upBtn">↑</div>
+    <div style="display:flex;gap:8px;">
+      <div class="btn" id="leftBtn">←</div>
+      <div class="btn" id="downBtn">↓</div>
+      <div class="btn" id="rightBtn">→</div>
+    </div>
+  </div>
+  <div style="margin-left:10px;">
+    <div class="fire" id="fireBtn">FIRE</div>
+  </div>
+</div>
+
+<div id="message"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
+<script>
+// ==================== Fortnite-Lite 3D Arena ====================
+
+// Scene, Camera, Renderer
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x222222);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 500);
+camera.position.set(0, 1.6, 0);
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+document.getElementById('canvas-wrap').appendChild(renderer.domElement);
+
+// Lighting
+const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 0.8);
+scene.add(hemi);
+const dir = new THREE.DirectionalLight(0xffffff,0.8);
+dir.position.set(10,20,10);
+dir.castShadow = true;
+scene.add(dir);
+
+// Ground
+const groundMat = new THREE.MeshStandardMaterial({ color:0x2b2b2b });
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200,200), groundMat);
+ground.rotation.x = -Math.PI/2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Obstacles
+const obstacles = [];
+const obsMat = new THREE.MeshStandardMaterial({ color:0x5555aa });
+for(let i=0;i<30;i++){
+  const obs = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), obsMat);
+  obs.position.set((Math.random()-0.5)*80,1,(Math.random()-0.5)*80);
+  obs.castShadow = true; obs.receiveShadow=true;
+  scene.add(obs); obstacles.push(obs);
+}
+
+// Player
+const player = { pos:new THREE.Vector3(0,0,0), vel:new THREE.Vector3(), speed:6, health:100, score:0, canShoot:true, shootCooldown:0.18 };
+
+// Camera follow
+function updateCamera(){ camera.position.set(player.pos.x, player.pos.y+1.6, player.pos.z); camera.rotation.set(pitch,yaw,0,'ZYX'); }
+
+// Pointer control
+let yaw=0, pitch=0, isPointerDown=false;
+function handlePointerMove(x,y){ const nx=(x/window.innerWidth-0.5)*2, ny=-(y/window.innerHeight-0.5)*2; yaw+=(-nx*yaw)*0.12; pitch=Math.max(-Math.PI/4, Math.min(Math.PI/4, -ny*Math.PI/4)); }
+
+// Movement
+const keys = {};
+window.addEventListener('keydown',e=>keys[e.key.toLowerCase()]=true);
+window.addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+
+// Mobile input
+const mobile = { up:false, down:false, left:false, right:false, fire:false };
+function applyInput(dt){
+  let dir=new THREE.Vector3();
+  if(keys['w']||keys['arrowup']||mobile.up) dir.z-=1;
+  if(keys['s']||keys['arrowdown']||mobile.down) dir.z+=1;
+  if(keys['a']||keys['arrowleft']||mobile.left) dir.x-=1;
+  if(keys['d']||keys['arrowright']||mobile.right) dir.x+=1;
+  if(dir.lengthSq()>0){ dir.normalize(); const f=new THREE.Vector3(Math.sin(yaw),0,Math.cos(yaw)), r=new THREE.Vector3(f.z,0,-f.x); const m=f.clone().multiplyScalar(-dir.z).add(r.clone().multiplyScalar(dir.x)).normalize(); player.pos.add(m.multiplyScalar(player.speed*dt)); }
+  if(mobile.fire && player.canShoot) doShoot();
+}
+
+// Bullets
+const bullets=[], bulletPool=[];
+function spawnBullet(origin,dir){ let b=bulletPool.pop(); if(!b){ const g=new THREE.SphereGeometry(0.08,8,8), m=new THREE.MeshStandardMaterial({ color:0xffffaa,emissive:0xffddaa,emissiveIntensity:0.8 }); b=new THREE.Mesh(g,m); b.userData.alive=false; scene.add(b); } b.position.copy(origin); b.userData.dir=dir.clone(); b.userData.alive=true; bullets.push(b); }
+
+// Enemies
+const enemies=[], enemyPool=[];
+function spawnEnemy(pos){ let en=enemyPool.pop(); if(!en){ const g=new THREE.SphereGeometry(0.6,12,12); const m=new THREE.MeshStandardMaterial({ color:0xee4444 }); en=new THREE.Mesh(g,m); scene.add(en); } en.position.copy(pos); en.userData.speed=1+Math.random()*1.5; en.userData.alive=true; enemies.push(en); }
+
+// Shoot
+const raycaster = new THREE.Raycaster();
+function doShoot(){ player.canShoot=false; setTimeout(()=>player.canShoot=true,player.shootCooldown*1000); const origin=camera.position.clone(), forward=new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion); spawnBullet(origin,forward); }
+
+// Spawn enemies over time
+let spawnTimer=0;
+function spawnWave(dt){ spawnTimer-=dt; if(spawnTimer<=0){ spawnTimer=1.5-Math.min(1,player.score*0.02); const angle=Math.random()*Math.PI*2; const radius=16+Math.random()*14; const x=player.pos.x+Math.cos(angle)*radius; const z=player.pos.z+Math.sin(angle)*radius; spawnEnemy(new THREE.Vector3(x,0.6,z)); }}
+
+// Collisions & updates
+function updateEntities(dt){
+  for(let i=bullets.length-1;i>=0;i--){ const b=bullets[i]; if(!b.userData.alive){ bullets.splice(i,1); continue;} b.position.add(b.userData.dir.clone().multiplyScalar(30*dt)); for(let j=enemies.length-1;j>=0;j--){ const en=enemies[j]; if(!en.userData.alive){ enemies.splice(j,1); continue;} if(b.position.distanceTo(en.position)<0.7){ en.userData.alive=false; scene.remove(en); enemyPool.push(en); enemies.splice(j,1); b.userData.alive=false; scene.remove(b); bulletPool.push(b); bullets.splice(i,1); player.score++; document.getElementById('score').textContent=player.score; break; } } }
+  for(let i=enemies.length-1;i>=0;i--){ const en=enemies[i]; if(!en.userData.alive){ enemies.splice(i,1); continue;} const dir=player.pos.clone().sub(en.position); dir.y=0; const dist=dir.length(); dir.normalize(); en.position.add(dir.multiplyScalar(en.userData.speed*dt*(1+player.score*0.01))); if(en.position.distanceTo(player.pos)<1.2){ player.health-=12+Math.floor(Math.random()*6); if(player.health<0)player.health=0; document.getElementById('health').textContent=player.health; en.userData.alive=false; scene.remove(en); enemyPool.push(en); enemies.splice(i,1); if(player.health<=0) gameOver(); } }
+}
+
+// Explosions
+const explosions=[];
+function spawnExplosion(pos){ const g=new THREE.SphereGeometry(0.3,8,8); const m=new THREE.MeshStandardMaterial({ color:0xffaa55, transparent:true, opacity:0.95 }); const s=new THREE.Mesh(g,m); s.position.copy(pos); s.userData.life=0.6; scene.add(s); explosions.push(s);}
+function updateExplosions(dt){ for(let i=explosions.length-1;i>=0;i--){ const e=explosions[i]; e.userData.life-=dt; e.scale.addScalar(dt*3); e.material.opacity=Math.max(0,e.userData.life/0.6); if(e.userData.life<=0){ scene.remove(e); explosions.splice(i,1);} } }
+
+// Game over
+const msg=document.getElementById('message');
+let running=true;
+function gameOver(){ running=false; msg.style.display='block'; msg.innerHTML=`<h2>You died</h2><div>Score: </div><div style="margin-top:10px"><button id="playAgain">Play Again</button></div>`; document.getElementById('playAgain').addEventListener('click',resetGame);}
+
+// Reset
+function resetGame(){ bullets.forEach(b=>{ if(b.parent) scene.remove(b); }); bullets.length=0; enemies.forEach(e=>{ if(e.parent) scene.remove(e); }); enemies.length=0; explosions.forEach(x=>{ if(x.parent) scene.remove(x); }); explosions.length=0; player.health=100; player.score=0; document.getElementById('score').textContent='0'; document.getElementById('health').textContent='100'; player.pos.set(0,0,0); yaw=0; pitch=0; running=true; msg.style.display='none';}
+document.getElementById('restartBtn').addEventListener('click',resetGame);
+
+// Pointer & shooting
+renderer.domElement.addEventListener('pointerdown',e=>{ isPointerDown=true; doShoot(); });
+renderer.domElement.addEventListener('pointerup',e=>{ isPointerDown=false; });
+renderer.domElement.addEventListener('pointermove',e=>{ if(isPointerDown) handlePointerMove(e.clientX,e.clientY); });
+renderer.domElement.addEventListener('click',()=>doShoot());
+
+// Mobile controls
+function setupMobileUI(){ const mc=document.getElementById('mobile-controls'); if(window.innerWidth<900){ mc.style.display='flex'; const mapBtn=(id,key)=>{ const el=document.getElementById(id); el.addEventListener('touchstart',e=>{ e.preventDefault(); mobile[key]=true; }); el.addEventListener('touchend',e=>{ e.preventDefault(); mobile[key]=false; }); el.addEventListener('mousedown',()=>mobile[key]=true); el.addEventListener('mouseup',()=>mobile[key]=false); el.addEventListener('mouseleave',()=>mobile[key]=false); }; mapBtn('upBtn','up'); mapBtn('downBtn','down'); mapBtn('leftBtn','left'); mapBtn('rightBtn','right'); const fireBtn=document.getElementById('fireBtn'); fireBtn.addEventListener('touchstart',e=>{ e.preventDefault(); mobile.fire=true; }); fireBtn.addEventListener('touchend',e=>{ e.preventDefault(); mobile.fire=false; }); fireBtn.addEventListener('mousedown',()=>mobile.fire=true); fireBtn.addEventListener('mouseup',()=>mobile.fire=false); fireBtn.addEventListener('mouseleave',()=>mobile.fire=false); }else mc.style.display='none';}
+setupMobileUI();
+window.addEventListener('resize',()=>{ renderer.setSize(window.innerWidth,window.innerHeight); camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); setupMobileUI(); });
+
+// Animation loop
+let last = performance.now()/1000;
+function animate(){
+  const now = performance.now()/1000, dt=Math.min(0.05, now-last); last=now;
+  if(running){ applyInput(dt); spawnWave(dt); updateEntities(dt); updateExplosions(dt); updateCamera(); }
+  renderer.render(scene,camera); requestAnimationFrame(animate);
+}
+animate();
+</script>
+</body>
+</html>
